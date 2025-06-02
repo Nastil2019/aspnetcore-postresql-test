@@ -1,0 +1,93 @@
+image: docker:latest
+services:
+  - docker:dind
+
+stages:
+  - build
+  - test
+  - deploy
+
+variables:
+  DOCKER_TLS_CERTDIR: ""
+  IMAGE_NAME: $CI_REGISTRY_IMAGE:latest
+  #POSTGRES_DB: blogdb
+  #POSTGRES_USER: bloguser
+  #POSTGRES_PASSWORD: bloguser
+
+before_script:
+   # Установка docker-compose через официальный бинарник
+  - mkdir -p /usr/local/bin
+  - |
+      COMPOSE_URL="https://github.com/docker/compose/releases/download/v2.23.0/docker-compose-$(uname -s)-$(uname -m)"
+      echo "Скачивание Docker Compose из $COMPOSE_URL"
+      curl -L "$COMPOSE_URL" -o /usr/local/bin/docker-compose
+
+      # Проверяем, действительно ли это исполняемый файл, а не HTML
+      if [ -f /usr/local/bin/docker-compose ]; then
+        if file /usr/local/bin/docker-compose | grep -q 'HTML'; then
+          echo "Ошибка: Загружен HTML вместо бинарника Docker Compose!"
+          exit 1
+        fi
+      else
+        echo "Ошибка: Файл Docker Compose не был загружен!"
+        exit 1
+      fi
+
+  - chmod +x /usr/local/bin/docker-compose
+  # Проверяем установленную версию
+
+  - docker-compose --version
+
+build_app:
+  stage: build
+  script:
+    - echo "hi"
+    - docker-compose build --no-cache
+    
+  tags:
+    - docker
+
+test_app:
+  stage: test
+  script:
+    - docker-compose down
+    - docker-compose up --build -d
+    - docker exec dockerapi sh -c "echo '172.19.0.2 postgres_image' >> /etc/hosts"
+    - docker exec dockerapi cat /etc/hosts
+    - sleep 30 # даем время PostgreSQL запуститься
+    - docker ps -a
+    - docker logs dockerapi
+    # Проверяем, установлен ли драйвер Npgsql
+    - docker exec dockerapi dotnet --info
+     # Посмотрите переменные окружения
+    - docker exec dockerapi printenv
+    # Проверьте /etc/hosts
+    - docker exec dockerapi cat /etc/hosts
+    # Проверьте, установлен ли psql
+    - docker exec dockerapi which psql
+    # Подключитесь вручную
+    - docker exec dockerapi sh -c "PGPASSWORD=bloguser psql -h postgres_image -U bloguser -d blogdb -c '\dt'"
+    # Проверьте, слушает ли API порт 80
+    - docker exec dockerapi ss -tuln
+    - docker exec dockerapi curl -v http://localhost:80/api/blog  
+    - docker logs postgres_image
+    - docker exec postgres_image psql -U bloguser -d blogdb -c 'SELECT * FROM blog;'
+    - docker ps -a
+    - docker inspect postgres_image | grep IPAddress
+    - docker exec dockerapi nslookup postgres_image
+    - docker exec dockerapi curl -s http://localhost:80/api/blog > /dev/null || exit 1
+    # Проверяем доступность Swagger
+    - docker exec dockerapi curl -s http://localhost:80/swagger > /dev/null || exit 1
+  tags:
+    - docker
+
+deploy_to_production: # Опционально
+  stage: deploy
+  script:
+    - echo "Deploying application..."
+    - docker-compose down
+    - docker-compose up -d
+  only:
+    - main
+  tags:
+    - docker
